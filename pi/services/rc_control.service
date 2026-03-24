@@ -1,0 +1,21 @@
+[Unit]
+Description=FPV RC Control Bridge (UDP → CRSF → UART)
+After=network-online.target vpn.service
+Wants=network-online.target
+Requires=vpn.service
+
+[Service]
+Type=simple
+User=pi
+Group=dialout
+EnvironmentFile=-/etc/fpv/fpv.env
+WorkingDirectory=/home/pi/fpv/scripts
+ExecStart=/usr/bin/python3 /home/pi/fpv/scripts/rc_control.py
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

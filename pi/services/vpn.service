@@ -1,0 +1,17 @@
+[Unit]
+Description=WireGuard VPN (fpv0)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/wg-quick up /etc/wireguard/fpv0.conf
+ExecStop=/usr/bin/wg-quick down /etc/wireguard/fpv0.conf
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

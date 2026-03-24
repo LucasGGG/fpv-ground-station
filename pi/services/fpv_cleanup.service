@@ -1,0 +1,8 @@
+[Unit]
+Description=FPV Auto Cleanup (delete files older than 3 days)
+
+[Service]
+Type=oneshot
+User=pi
+ExecStart=/usr/bin/find /home/pi/fpv/recordings -type f \( -name "*.mp4" -o -name "*.jpg" \) -mtime +3 -delete
+StandardOutput=journal

@@ -1,0 +1,17 @@
+[Unit]
+Description=STM32 Watchdog Heartbeat Sender
+After=sysinit.target
+
+[Service]
+Type=simple
+User=pi
+Group=dialout
+EnvironmentFile=-/etc/fpv/fpv.env
+ExecStart=/usr/bin/python3 /home/pi/fpv/scripts/watchdog_heartbeat.py
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

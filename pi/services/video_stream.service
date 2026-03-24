@@ -1,0 +1,19 @@
+[Unit]
+Description=FPV Video Stream (GStreamer)
+After=network-online.target vpn.service
+Wants=network-online.target
+Requires=vpn.service
+
+[Service]
+Type=simple
+User=pi
+EnvironmentFile=-/etc/fpv/fpv.env
+ExecStart=/home/pi/fpv/scripts/video_stream.sh
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

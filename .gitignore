@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Sensitive / secrets — NEVER commit these
+pi/config/fpv0.conf
+operator/fpv0_operator.conf
+*.key
+*.pem
+*.p12
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Recordings / media
+pi/recordings/
+*.mp4
+*.jpg
+*.jpeg
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.idea/
+
+# Temp
+{pi/
