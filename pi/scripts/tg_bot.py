@@ -18,7 +18,7 @@ FPV Ground Station — Telegram Bot (повна версія)
 """
 
 import os, time, socket, subprocess, urllib.request, urllib.parse
-import json, logging, threading, shutil, glob, datetime, re
+import json, logging, threading, shutil, datetime, re
 
 logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -30,11 +30,8 @@ CHECK_INTERVAL = 60
 WG_CONF        = "/etc/wireguard/fpv0.conf"
 FPV_ENV        = "/etc/fpv/fpv.env"
 SERVICES       = ["vpn", "video_stream", "rc_control"]
-RECORDINGS_DIR = "/home/pi/fpv/recordings"
 ACTION_LOG     = "/home/pi/fpv/action.log"
 HTTP_PORT      = 8080
-
-os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -297,64 +294,6 @@ def make_graph(data: list, title: str, ylabel: str, color: str) -> bytes:
     except ImportError:
         return b""
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Video recording
-# Записи робляться автоматично через video_stream.sh (ENABLE_RECORDING=1).
-# Бот лише перемикає режим через fpv.env і показує файли.
-# ══════════════════════════════════════════════════════════════════════════════
-
-def is_recording_enabled() -> bool:
-    try:
-        with open(FPV_ENV) as f:
-            for line in f:
-                if line.strip().startswith("ENABLE_RECORDING"):
-                    return "1" in line.split("=", 1)[1]
-    except Exception: pass
-    return True  # default on
-
-def set_recording(enabled: bool) -> str:
-    val = "1" if enabled else "0"
-    try:
-        r = subprocess.run(
-            ["sed", "-i", f"s|^ENABLE_RECORDING=.*|ENABLE_RECORDING={val}|", FPV_ENV],
-            capture_output=True, timeout=5)
-        if r.returncode != 0:
-            # Рядка немає — додаємо
-            with open(FPV_ENV, "a") as f:
-                f.write(f"\nENABLE_RECORDING={val}\n")
-        subprocess.run(["systemctl", "restart", "video_stream"], timeout=10)
-        alog(f"recording {'enabled' if enabled else 'disabled'}")
-        state_str = "🔴 Запис увімкнено" if enabled else "⏹ Запис вимкнено"
-        return f"{state_str}\n(video_stream перезапущено)"
-    except Exception as e:
-        return f"❌ Помилка: {e}"
-
-def list_recordings() -> str:
-    files = sorted(glob.glob(f"{RECORDINGS_DIR}/*.mp4"), reverse=True)
-    if not files: return "Немає записів"
-    local_ip = get_local_ip()
-    lines = []
-    for f in files[:10]:
-        fname = os.path.basename(f)
-        size  = os.path.getsize(f) // 1024
-        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(f)).strftime("%d.%m %H:%M")
-        link  = f"http://{local_ip}:{HTTP_PORT}/{fname}"
-        lines.append(f"📹 <code>{fname}</code>\n   {size} KB | {mtime}\n   🔗 <code>{link}</code>")
-    return "\n\n".join(lines)
-
-def cleanup_old_files(days: int = 3):
-    cutoff = time.time() - days * 86400
-    removed = 0
-    for pattern in [f"{RECORDINGS_DIR}/*.mp4", f"{RECORDINGS_DIR}/*.jpg"]:
-        for f in glob.glob(pattern):
-            if os.path.getmtime(f) < cutoff:
-                os.remove(f); removed += 1
-    if removed:
-        log.info("Cleanup: removed %d files older than %d days", removed, days)
-        send(f"🗑 Автоочистка: видалено {removed} файлів старше {days} днів")
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Keyboards
 # ══════════════════════════════════════════════════════════════════════════════
@@ -369,11 +308,10 @@ def kb_main():
          {"text": "🌐 Мережа",       "callback_data": "net_menu"}],
         [{"text": "🖥 Термінал",     "callback_data": "terminal"},
          {"text": "📈 Графіки",      "callback_data": "graphs_menu"}],
-        [{"text": "📹 Відео",        "callback_data": "video_menu"},
-         {"text": "⚙️ Конфіг",       "callback_data": "config_menu"}],
-        [{"text": "🔴 Kill Switch",  "callback_data": "killswitch_confirm"},
-         {"text": "⏹ Shutdown",      "callback_data": "shutdown_confirm"}],
-        [{"text": "⚡ Reboot",        "callback_data": "reboot_confirm"}],
+        [{"text": "⚙️ Конфіг",       "callback_data": "config_menu"},
+         {"text": "🔴 Kill Switch",  "callback_data": "killswitch_confirm"}],
+        [{"text": "⏹ Shutdown",      "callback_data": "shutdown_confirm"},
+         {"text": "⚡ Reboot",        "callback_data": "reboot_confirm"}],
     ]}
 
 def kb_services():
@@ -412,7 +350,6 @@ def kb_net():
         [{"text": "📶 Ping Google",   "callback_data": "ping_8888"},
          {"text": "📶 Ping VPN",      "callback_data": "ping_operator"}],
         [{"text": "🛰 Starlink",       "callback_data": "starlink_status"}],
-        [{"text": "📸 Скріншот",       "callback_data": "screenshot"}],
         [{"text": "◀️ Назад",          "callback_data": "main"}],
     ]}
 
@@ -422,16 +359,6 @@ def kb_graphs():
         [{"text": "📶 Ping (matplotlib)", "callback_data": "graph_ping"}],
         [{"text": "📊 Ping текст (60хв)", "callback_data": "graph_ping_text"}],
         [{"text": "◀️ Назад",             "callback_data": "main"}],
-    ]}
-
-def kb_video():
-    is_rec = is_recording_enabled()
-    return {"inline_keyboard": [
-        [{"text": "⏹ Вимкнути запис" if is_rec else "🔴 Увімкнути запис",
-          "callback_data": "rec_stop" if is_rec else "rec_start"}],
-        [{"text": "📁 Список записів",     "callback_data": "rec_list"}],
-        [{"text": "🗑 Очистити старі (3д)", "callback_data": "rec_cleanup"}],
-        [{"text": "◀️ Назад",              "callback_data": "main"}],
     ]}
 
 def kb_config():
@@ -681,26 +608,6 @@ def handle_callback(cb: dict):
              f"📶 <b>Ping оператора:</b>\n<code>{ping_host('10.0.0.2')}</code>", kb_net())
     elif data == "starlink_status":
         edit(chat_id, message_id, check_starlink(), kb_net())
-    elif data == "screenshot":
-        edit(chat_id, message_id, "📸 Беру кадр з запису...")
-        # Знаходимо останній MP4 і витягуємо останній кадр через ffmpeg
-        files = sorted(glob.glob(f"{RECORDINGS_DIR}/*.mp4"), reverse=True)
-        snap_path = "/tmp/fpv_shot.jpg"
-        ok = False
-        if files:
-            r = subprocess.run(
-                ["ffmpeg", "-y", "-sseof", "-2", "-i", files[0],
-                 "-frames:v", "1", "-q:v", "2", snap_path],
-                capture_output=True, timeout=15)
-            ok = r.returncode == 0 and os.path.exists(snap_path)
-        if ok:
-            with open(snap_path, "rb") as f:
-                send_photo_bytes(f.read(), f"📹 Кадр з {os.path.basename(files[0])}")
-            edit(chat_id, message_id, "📸 Надіслано", kb_net())
-        else:
-            edit(chat_id, message_id,
-                 "❌ Немає записів або ffmpeg недоступний.\n"
-                 "Переконайся що відео запис увімкнено (📹 Відео → 🔴 Запис)", kb_net())
 
     # ── Graphs ──
     elif data == "graphs_menu":
@@ -729,22 +636,6 @@ def handle_callback(cb: dict):
         edit(chat_id, message_id,
              f"<b>📊 Ping інтернету (8.8.8.8)</b>\n\n<pre>{ascii_ping_graph()}</pre>",
              kb_graphs())
-
-    # ── Video ──
-    elif data == "video_menu":
-        edit(chat_id, message_id, "📹 <b>Відео</b>", kb_video())
-    elif data == "rec_start":
-        result = set_recording(True)
-        edit(chat_id, message_id, result, kb_video())
-    elif data == "rec_stop":
-        result = set_recording(False)
-        edit(chat_id, message_id, result, kb_video())
-    elif data == "rec_list":
-        edit(chat_id, message_id,
-             f"<b>📁 Записи ({RECORDINGS_DIR}):</b>\n\n{list_recordings()}", kb_video())
-    elif data == "rec_cleanup":
-        cleanup_old_files(3)
-        edit(chat_id, message_id, "🗑 Старі файли видалено", kb_video())
 
     # ── Config ──
     elif data == "config_menu":
