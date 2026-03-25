@@ -1,0 +1,14 @@
+[Unit]
+Description=FPV System Watchdog
+After=network.target video_stream.service rc_control.service
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/fpv/fpv.env
+ExecStart=/usr/bin/python3 /home/pi/fpv/scripts/watchdog.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

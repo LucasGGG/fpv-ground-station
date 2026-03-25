@@ -103,12 +103,21 @@ fi
 info "Installing systemd services..."
 SVC_SRC="$(dirname "$(realpath "$0")")/services"
 
-for svc in vpn video_stream rc_control; do
+for svc in vpn video_stream rc_control ip_notifier tg_bot watchdog web_dashboard; do
+    [[ -f "$SVC_SRC/${svc}.service" ]] || continue
     cp "$SVC_SRC/${svc}.service" "$SERVICE_DIR/"
     systemctl daemon-reload
     systemctl enable "${svc}.service"
     info "Enabled: ${svc}.service"
 done
+
+# Timer для очищення записів
+for timer in fpv_cleanup; do
+    [[ -f "$SVC_SRC/${timer}.service" ]] && cp "$SVC_SRC/${timer}.service" "$SERVICE_DIR/"
+    [[ -f "$SVC_SRC/${timer}.timer"   ]] && cp "$SVC_SRC/${timer}.timer"   "$SERVICE_DIR/"
+done
+systemctl daemon-reload
+systemctl enable fpv_cleanup.timer 2>/dev/null && systemctl start fpv_cleanup.timer || true
 
 # ─── 8. Kernel networking tweaks ───────────────────────────────────────────
 info "Applying network performance tweaks..."
