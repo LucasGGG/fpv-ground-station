@@ -32,23 +32,31 @@ logging.basicConfig(
 )
 log = logging.getLogger("rc_bridge")
 
-UART_PORT   = os.environ.get("UART_PORT",    "/dev/serial0")
-UART_BAUD   = int(os.environ.get("UART_BAUD", "420000"))
-UDP_PORT    = int(os.environ.get("RC_UDP_PORT", "5601"))
-CRSF_HZ     = int(os.environ.get("CRSF_HZ",    "100"))   # frames/sec to TX
-FAILSAFE_TIMEOUT = 1.0   # seconds without packet → failsafe
+UART_PORT        = os.environ.get("UART_PORT",    "/dev/serial0")
+UART_BAUD        = int(os.environ.get("UART_BAUD", "420000"))
+UDP_PORT         = int(os.environ.get("RC_UDP_PORT", "5601"))
+CRSF_HZ          = int(os.environ.get("CRSF_HZ",    "100"))
+FAILSAFE_TIMEOUT = float(os.environ.get("FAILSAFE_TIMEOUT", "1.0"))
 
-PACKET_MAGIC    = b'\x52\x43'   # "RC"
-PACKET_SIZE     = 36
-CHANNELS_COUNT  = 16
-CENTER_US       = 1500
-THROTTLE_IDX    = 2
+PACKET_MAGIC   = b'\x52\x43'
+PACKET_SIZE    = 36
+CHANNELS_COUNT = 16
+CENTER_US      = 1500
+THROTTLE_IDX   = 2   # CH3
+ARM_IDX        = 4   # CH5 — SE switch (2000=armed)
+ARM_DISARMED   = 1000
+
+STATS_INTERVAL = 10.0   # log packet rate every N seconds
 
 running = True
 last_packet_time = 0.0
 channel_lock = threading.Lock()
 channels_us = [CENTER_US] * CHANNELS_COUNT
-channels_us[THROTTLE_IDX] = 1000   # safe default throttle
+channels_us[THROTTLE_IDX] = ARM_DISARMED
+
+# Stats
+packets_received = 0
+packets_bad = 0
 
 
 def open_serial() -> serial.Serial:
@@ -63,7 +71,7 @@ def open_serial() -> serial.Serial:
 
 
 def udp_receiver():
-    global last_packet_time, channels_us
+    global last_packet_time, channels_us, packets_received, packets_bad
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -80,55 +88,72 @@ def udp_receiver():
             break
 
         if len(data) != PACKET_SIZE:
+            packets_bad += 1
             log.debug("Bad packet size: %d from %s", len(data), addr)
             continue
 
-        magic = data[:2]
-        if magic != PACKET_MAGIC:
-            log.debug("Bad magic: %s from %s", magic.hex(), addr)
+        if data[:2] != PACKET_MAGIC:
+            packets_bad += 1
+            log.debug("Bad magic from %s", addr)
             continue
 
         raw_channels = data[2:34]
         checksum_recv = struct.unpack_from("<H", data, 34)[0]
-        checksum_calc = sum(raw_channels) & 0xFFFF
-        if checksum_recv != checksum_calc:
+        if (sum(raw_channels) & 0xFFFF) != checksum_recv:
+            packets_bad += 1
             log.debug("Checksum mismatch from %s", addr)
             continue
 
-        new_channels = list(struct.unpack("<16H", raw_channels))
-        # Clamp to valid range
-        new_channels = [max(1000, min(2000, ch)) for ch in new_channels]
+        new_channels = [max(1000, min(2000, ch))
+                        for ch in struct.unpack("<16H", raw_channels)]
 
         with channel_lock:
             channels_us[:] = new_channels
             last_packet_time = time.monotonic()
+            packets_received += 1
 
     sock.close()
+
+
+def make_failsafe_channels() -> list:
+    """
+    Failsafe values:
+    - Throttle → 1000 (motors off)
+    - ARM (CH5) → 1000 (disarmed)
+    - Everything else → center
+    """
+    ch = [CENTER_US] * CHANNELS_COUNT
+    ch[THROTTLE_IDX] = ARM_DISARMED
+    ch[ARM_IDX] = ARM_DISARMED
+    return ch
 
 
 def crsf_sender():
     ser = open_serial()
     interval = 1.0 / CRSF_HZ
     in_failsafe = False
+    last_stats_time = time.monotonic()
+    last_stats_rx = 0
 
     while running:
         t_start = time.monotonic()
 
         now = time.monotonic()
         with channel_lock:
-            age = now - last_packet_time
+            age = now - last_packet_time if last_packet_time > 0 else float("inf")
             ch = list(channels_us)
+            rx_count = packets_received
 
-        if last_packet_time == 0 or age > FAILSAFE_TIMEOUT:
-            frame = build_failsafe_frame()
+        if age > FAILSAFE_TIMEOUT:
             if not in_failsafe:
-                log.warning("FAILSAFE — no packets for %.1fs", age)
+                log.warning("FAILSAFE ACTIVE — no packets for %.1fs (throttle=1000, arm=1000)", age)
                 in_failsafe = True
+            frame = build_rc_frame(make_failsafe_channels())
         else:
-            frame = build_rc_frame(ch)
             if in_failsafe:
-                log.info("Recovered from failsafe")
+                log.info("Link recovered — resuming normal control")
                 in_failsafe = False
+            frame = build_rc_frame(ch)
 
         try:
             ser.write(frame)
@@ -140,20 +165,27 @@ def crsf_sender():
                 pass
             ser = open_serial()
 
+        # Periodic stats
+        if now - last_stats_time >= STATS_INTERVAL:
+            delta_rx = rx_count - last_stats_rx
+            rate = delta_rx / STATS_INTERVAL
+            arm_state = "ARMED" if ch[ARM_IDX] >= 1800 else "disarmed"
+            log.info(
+                "Link: %.0f pkt/s | bad=%d | thro=%d | arm=%s | age=%.2fs",
+                rate, packets_bad, ch[THROTTLE_IDX], arm_state, age if age != float("inf") else -1
+            )
+            last_stats_time = now
+            last_stats_rx = rx_count
+
         elapsed = time.monotonic() - t_start
         sleep_time = interval - elapsed
         if sleep_time > 0:
             time.sleep(sleep_time)
 
 
-def apply_smoothing(prev: list, new: list, alpha: float = 0.7) -> list:
-    """Exponential smoothing — weight toward new value."""
-    return [int(alpha * n + (1.0 - alpha) * p) for p, n in zip(prev, new)]
-
-
 def handle_signal(sig, frame):
     global running
-    log.info("Signal %d received, shutting down...", sig)
+    log.info("Signal %d — shutting down, sending failsafe...", sig)
     running = False
     sys.exit(0)
 

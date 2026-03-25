@@ -429,9 +429,10 @@ def kb_net():
 
 def kb_graphs():
     return {"inline_keyboard": [
-        [{"text": "🌡 Температура CPU",  "callback_data": "graph_temp"}],
-        [{"text": "📶 Ping Google",      "callback_data": "graph_ping"}],
-        [{"text": "◀️ Назад",            "callback_data": "main"}],
+        [{"text": "🌡 Температура CPU",   "callback_data": "graph_temp"}],
+        [{"text": "📶 Ping (matplotlib)", "callback_data": "graph_ping"}],
+        [{"text": "📊 Ping текст (60хв)", "callback_data": "graph_ping_text"}],
+        [{"text": "◀️ Назад",             "callback_data": "main"}],
     ]}
 
 def kb_video():
@@ -475,12 +476,71 @@ def kb_back():
 # Text builders
 # ══════════════════════════════════════════════════════════════════════════════
 
+def ascii_ping_graph() -> str:
+    if len(ping_history) < 2:
+        return "⏳ Збираю дані... (потрібно хвилину)"
+
+    values = [v for _, v in ping_history if v >= 0]
+    if not values:
+        return "❌ Немає відповідей від 8.8.8.8"
+
+    min_v  = min(values)
+    max_v  = max(values)
+    avg_v  = sum(values) / len(values)
+    last_v = values[-1]
+    rows   = 6
+    cols   = min(len(ping_history), 40)
+    data   = ping_history[-cols:]
+
+    # Нормалізуємо до 0..rows
+    span = max_v - min_v if max_v != min_v else 1
+    def norm(v):
+        if v < 0: return -1
+        return int((v - min_v) / span * (rows - 1))
+
+    lines = []
+    for row in range(rows - 1, -1, -1):
+        label = f"{int(min_v + span * row / (rows-1)):4d}ms │"
+        bar = ""
+        for _, v in data:
+            n = norm(v)
+            if n < 0:
+                bar += "░"
+            elif n == row:
+                bar += "█"
+            elif n > row:
+                bar += "│"
+            else:
+                bar += " "
+        lines.append(label + bar)
+
+    lines.append("      └" + "─" * cols)
+    lines.append(f"      {len(data)} точок · остання {len(data)} хв")
+    lines.append(f"\n📊 Зараз: {last_v:.1f}ms  Avg: {avg_v:.1f}ms  Min: {min_v:.1f}ms  Max: {max_v:.1f}ms")
+
+    # Оцінка якості
+    if avg_v < 50:
+        quality = "🟢 Відмінно"
+    elif avg_v < 150:
+        quality = "🟡 Добре"
+    elif avg_v < 300:
+        quality = "🟠 Задовільно"
+    else:
+        quality = "🔴 Погано"
+
+    lines.append(f"🌐 Якість: {quality}")
+    return "\n".join(lines)
+
+
 def text_status() -> str:
     used_ram, total_ram = get_ram_usage()
     disk_pct, disk_free = get_disk_usage()
-    temp = get_cpu_temp()
+    temp     = get_cpu_temp()
+    ping_ms  = get_ping_ms("8.8.8.8")
     temp_icon = "🔥" if temp > 75 else ("🌡" if temp > 60 else "✅")
     disk_icon = "⚠️" if disk_pct > 90 else "💾"
+    ping_icon = "🔴" if ping_ms < 0 else ("🟢" if ping_ms < 100 else ("🟡" if ping_ms < 300 else "🟠"))
+    ping_str  = "недоступно" if ping_ms < 0 else f"{ping_ms:.1f} ms"
     lines = ["<b>📊 Статус системи</b>\n"]
     for svc in SERVICES:
         lines.append(f"{service_status(svc)}  {svc}")
@@ -493,6 +553,7 @@ def text_status() -> str:
         f"{disk_icon} Диск:          <code>{disk_pct}% (вільно {disk_free}GB)</code>",
         f"⏱ Uptime:        <code>{get_uptime()}</code>",
         f"📶 Wi-Fi:         <code>{get_wifi_signal()}</code>",
+        f"{ping_icon} Ping інтернет: <code>{ping_str}</code>",
     ]
     return "\n".join(lines)
 
@@ -666,6 +727,10 @@ def handle_callback(cb: dict):
             edit(chat_id, message_id,
                  "⚠️ matplotlib не встановлено.\n<code>sudo apt install python3-matplotlib</code>",
                  kb_graphs())
+    elif data == "graph_ping_text":
+        edit(chat_id, message_id,
+             f"<b>📊 Ping інтернету (8.8.8.8)</b>\n\n<pre>{ascii_ping_graph()}</pre>",
+             kb_graphs())
 
     # ── Video ──
     elif data == "video_menu":

@@ -1,6 +1,6 @@
 #!/bin/bash
-# FPV Video Streaming - GStreamer pipeline
-# Captures from USB capture card, encodes H264, streams via UDP RTP
+# FPV Video Streaming + Local Recording
+# GStreamer tee: одна гілка UDP RTP → оператор, друга → MP4 файл на Pi
 
 set -euo pipefail
 
@@ -11,6 +11,9 @@ WIDTH=720
 HEIGHT=480
 FPS=30
 BITRATE=1200  # kbps
+
+RECORD_DIR="${RECORD_DIR:-/home/pi/fpv/recordings}"
+RECORD="${ENABLE_RECORDING:-1}"   # 1=увімкнено, 0=вимкнено
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
@@ -31,21 +34,49 @@ wait_for_device() {
 }
 
 run_pipeline() {
-    log "Starting stream: $DEVICE -> $HOST:$PORT @ ${WIDTH}x${HEIGHT}@${FPS}fps ${BITRATE}kbps"
-    exec gst-launch-1.0 -e \
-        v4l2src device="$DEVICE" \
-        ! video/x-raw,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1 \
-        ! videoconvert \
-        ! x264enc \
-            tune=zerolatency \
-            speed-preset=ultrafast \
-            bitrate=$BITRATE \
-            key-int-max=$((FPS * 2)) \
-            threads=2 \
-        ! video/x-h264,profile=baseline \
-        ! h264parse \
-        ! rtph264pay config-interval=1 pt=96 \
-        ! udpsink host="$HOST" port="$PORT" sync=false async=false
+    local ts
+    ts=$(date '+%Y%m%d_%H%M%S')
+    local outfile="$RECORD_DIR/fpv_${ts}.mp4"
+    mkdir -p "$RECORD_DIR"
+
+    if [ "$RECORD" = "1" ]; then
+        log "Starting stream+record: $DEVICE -> $HOST:$PORT | $outfile"
+        exec gst-launch-1.0 -e \
+            v4l2src device="$DEVICE" \
+            ! video/x-raw,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1 \
+            ! videoconvert \
+            ! x264enc \
+                tune=zerolatency \
+                speed-preset=ultrafast \
+                bitrate=$BITRATE \
+                key-int-max=$((FPS * 2)) \
+                threads=2 \
+            ! video/x-h264,profile=baseline \
+            ! h264parse \
+            ! tee name=t \
+            t. ! queue max-size-buffers=300 leaky=downstream \
+               ! rtph264pay config-interval=1 pt=96 \
+               ! udpsink host="$HOST" port="$PORT" sync=false async=false \
+            t. ! queue max-size-buffers=300 leaky=downstream \
+               ! mp4mux faststart=true \
+               ! filesink location="$outfile" sync=false
+    else
+        log "Starting stream only: $DEVICE -> $HOST:$PORT"
+        exec gst-launch-1.0 -e \
+            v4l2src device="$DEVICE" \
+            ! video/x-raw,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1 \
+            ! videoconvert \
+            ! x264enc \
+                tune=zerolatency \
+                speed-preset=ultrafast \
+                bitrate=$BITRATE \
+                key-int-max=$((FPS * 2)) \
+                threads=2 \
+            ! video/x-h264,profile=baseline \
+            ! h264parse \
+            ! rtph264pay config-interval=1 pt=96 \
+            ! udpsink host="$HOST" port="$PORT" sync=false async=false
+    fi
 }
 
 main() {
