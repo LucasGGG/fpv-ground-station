@@ -300,45 +300,35 @@ def make_graph(data: list, title: str, ylabel: str, color: str) -> bytes:
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Video recording
+# Записи робляться автоматично через video_stream.sh (ENABLE_RECORDING=1).
+# Бот лише перемикає режим через fpv.env і показує файли.
 # ══════════════════════════════════════════════════════════════════════════════
 
-recording_proc = None
-recording_file = ""
+def is_recording_enabled() -> bool:
+    try:
+        with open(FPV_ENV) as f:
+            for line in f:
+                if line.strip().startswith("ENABLE_RECORDING"):
+                    return "1" in line.split("=", 1)[1]
+    except Exception: pass
+    return True  # default on
 
-def start_recording() -> str:
-    global recording_proc, recording_file
-    if recording_proc and recording_proc.poll() is None:
-        return "⚠️ Запис вже йде"
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    recording_file = f"{RECORDINGS_DIR}/rec_{ts}.mp4"
-    cmd = (
-        f"gst-launch-1.0 -e "
-        f"v4l2src device=/dev/video0 "
-        f"! video/x-raw,width=720,height=480,framerate=30/1 "
-        f"! videoconvert "
-        f"! x264enc tune=zerolatency speed-preset=ultrafast bitrate=1200 "
-        f"! mp4mux "
-        f"! filesink location={recording_file}"
-    )
-    recording_proc = subprocess.Popen(cmd, shell=True)
-    alog(f"recording started: {recording_file}")
-    return f"🔴 Запис розпочато\n<code>{recording_file}</code>"
-
-def stop_recording() -> str:
-    global recording_proc, recording_file
-    if not recording_proc or recording_proc.poll() is not None:
-        return "⚠️ Запис не йде"
-    recording_proc.terminate()
-    recording_proc.wait(timeout=5)
-    recording_proc = None
-    fname = os.path.basename(recording_file)
-    size  = os.path.getsize(recording_file) // 1024 if os.path.exists(recording_file) else 0
-    alog(f"recording stopped: {recording_file}")
-    local_ip = get_local_ip()
-    link = f"http://{local_ip}:{HTTP_PORT}/{fname}"
-    return (f"⏹ Запис зупинено\n"
-            f"📁 Файл: <code>{fname}</code> ({size} KB)\n"
-            f"🔗 Завантажити: <code>{link}</code>")
+def set_recording(enabled: bool) -> str:
+    val = "1" if enabled else "0"
+    try:
+        r = subprocess.run(
+            ["sed", "-i", f"s|^ENABLE_RECORDING=.*|ENABLE_RECORDING={val}|", FPV_ENV],
+            capture_output=True, timeout=5)
+        if r.returncode != 0:
+            # Рядка немає — додаємо
+            with open(FPV_ENV, "a") as f:
+                f.write(f"\nENABLE_RECORDING={val}\n")
+        subprocess.run(["systemctl", "restart", "video_stream"], timeout=10)
+        alog(f"recording {'enabled' if enabled else 'disabled'}")
+        state_str = "🔴 Запис увімкнено" if enabled else "⏹ Запис вимкнено"
+        return f"{state_str}\n(video_stream перезапущено)"
+    except Exception as e:
+        return f"❌ Помилка: {e}"
 
 def list_recordings() -> str:
     files = sorted(glob.glob(f"{RECORDINGS_DIR}/*.mp4"), reverse=True)
@@ -370,7 +360,6 @@ def cleanup_old_files(days: int = 3):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def kb_main():
-    rec_icon = "⏹ Зупинити запис" if (recording_proc and recording_proc.poll() is None) else "🔴 Записати відео"
     return {"inline_keyboard": [
         [{"text": "📊 Статус",       "callback_data": "status"},
          {"text": "🌐 IP адреси",    "callback_data": "ip"}],
@@ -436,13 +425,13 @@ def kb_graphs():
     ]}
 
 def kb_video():
-    is_rec = recording_proc and recording_proc.poll() is None
+    is_rec = is_recording_enabled()
     return {"inline_keyboard": [
-        [{"text": "⏹ Зупинити запис" if is_rec else "🔴 Почати запис",
+        [{"text": "⏹ Вимкнути запис" if is_rec else "🔴 Увімкнути запис",
           "callback_data": "rec_stop" if is_rec else "rec_start"}],
-        [{"text": "📁 Список записів",    "callback_data": "rec_list"}],
-        [{"text": "🗑 Очистити старі (3д)","callback_data": "rec_cleanup"}],
-        [{"text": "◀️ Назад",             "callback_data": "main"}],
+        [{"text": "📁 Список записів",     "callback_data": "rec_list"}],
+        [{"text": "🗑 Очистити старі (3д)", "callback_data": "rec_cleanup"}],
+        [{"text": "◀️ Назад",              "callback_data": "main"}],
     ]}
 
 def kb_config():
@@ -693,16 +682,25 @@ def handle_callback(cb: dict):
     elif data == "starlink_status":
         edit(chat_id, message_id, check_starlink(), kb_net())
     elif data == "screenshot":
-        edit(chat_id, message_id, "📸 Роблю скріншот...")
-        path = "/tmp/fpv_shot.jpg"
-        r = subprocess.run(
-            ["fswebcam", "-d", "/dev/video0", "-r", "720x480", "--no-banner", path],
-            capture_output=True, timeout=10)
-        if r.returncode == 0 and os.path.exists(path):
-            with open(path, "rb") as f: send_photo_bytes(f.read(), "📹 Знімок")
+        edit(chat_id, message_id, "📸 Беру кадр з запису...")
+        # Знаходимо останній MP4 і витягуємо останній кадр через ffmpeg
+        files = sorted(glob.glob(f"{RECORDINGS_DIR}/*.mp4"), reverse=True)
+        snap_path = "/tmp/fpv_shot.jpg"
+        ok = False
+        if files:
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-sseof", "-2", "-i", files[0],
+                 "-frames:v", "1", "-q:v", "2", snap_path],
+                capture_output=True, timeout=15)
+            ok = r.returncode == 0 and os.path.exists(snap_path)
+        if ok:
+            with open(snap_path, "rb") as f:
+                send_photo_bytes(f.read(), f"📹 Кадр з {os.path.basename(files[0])}")
             edit(chat_id, message_id, "📸 Надіслано", kb_net())
         else:
-            edit(chat_id, message_id, "❌ fswebcam не встановлено або камера недоступна", kb_net())
+            edit(chat_id, message_id,
+                 "❌ Немає записів або ffmpeg недоступний.\n"
+                 "Переконайся що відео запис увімкнено (📹 Відео → 🔴 Запис)", kb_net())
 
     # ── Graphs ──
     elif data == "graphs_menu":
@@ -736,10 +734,10 @@ def handle_callback(cb: dict):
     elif data == "video_menu":
         edit(chat_id, message_id, "📹 <b>Відео</b>", kb_video())
     elif data == "rec_start":
-        result = start_recording()
+        result = set_recording(True)
         edit(chat_id, message_id, result, kb_video())
     elif data == "rec_stop":
-        result = stop_recording()
+        result = set_recording(False)
         edit(chat_id, message_id, result, kb_video())
     elif data == "rec_list":
         edit(chat_id, message_id,

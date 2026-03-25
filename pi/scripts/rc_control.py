@@ -145,7 +145,7 @@ def crsf_sender():
             rx_count = packets_received
 
         if age > FAILSAFE_TIMEOUT:
-            if not in_failsafe:
+            if not in_failsafe and last_packet_time > 0:
                 log.warning("FAILSAFE ACTIVE — no packets for %.1fs (throttle=1000, arm=1000)", age)
                 in_failsafe = True
             frame = build_rc_frame(make_failsafe_channels())
